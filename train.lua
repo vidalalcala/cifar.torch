@@ -1,6 +1,6 @@
 require 'xlua'
 require 'optim'
-require 'cutorch'
+require 'clnn'
 dofile './provider.lua'
 local c = require 'trepl.colorize'
 
@@ -41,8 +41,8 @@ end
 print(c.blue '==>' ..' configuring model')
 local model = nn.Sequential()
 model:add(nn.BatchFlip():float())
-model:add(nn.Copy('torch.FloatTensor','torch.CudaTensor'):cuda())
-model:add(nn.Sequential():add(dofile('models/'..opt.model..'.lua'):cuda()))
+model:add(nn.Copy('torch.FloatTensor','torch.ClTensor'):cl())
+model:add(nn.Sequential():add(dofile('models/'..opt.model..'.lua'):cl()))
 model:get(2).updateGradInput = function(input) return end
 print(model)
 
@@ -60,7 +60,7 @@ parameters,gradParameters = model:getParameters()
 
 
 print(c.blue'==>' ..' setting criterion')
-criterion = nn.CrossEntropyCriterion():cuda()
+criterion = nn.CrossEntropyCriterion():cl()
 
 
 print(c.blue'==>' ..' configuring optimizer')
@@ -82,7 +82,7 @@ function train()
   
   print(c.blue '==>'.." online epoch # " .. epoch .. ' [batchSize = ' .. opt.batchSize .. ']')
 
-  local targets = torch.CudaTensor(opt.batchSize)
+  local targets = torch.ClTensor(opt.batchSize)
   local indices = torch.randperm(provider.trainData.data:size(1)):long():split(opt.batchSize)
   indices[#indices] = nil
 

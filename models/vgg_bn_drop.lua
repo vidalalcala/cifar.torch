@@ -1,5 +1,5 @@
 require 'nn'
-require 'cunn'
+require 'clnn'
 
 local backend_name = 'nn'
 
@@ -16,7 +16,7 @@ local vgg = nn.Sequential()
 -- building block
 local function ConvBNReLU(nInputPlane, nOutputPlane)
   vgg:add(backend.SpatialConvolution(nInputPlane, nOutputPlane, 3,3, 1,1, 1,1))
-  vgg:add(nn.SpatialBatchNormalization(nOutputPlane,1e-3))
+  --vgg:add(nn.SpatialBatchNormalization(nOutputPlane,1e-3))
   vgg:add(backend.ReLU(true))
   return vgg
 end
@@ -55,7 +55,7 @@ vgg:add(nn.View(512))
 classifier = nn.Sequential()
 classifier:add(nn.Dropout(0.5))
 classifier:add(nn.Linear(512,512))
-classifier:add(nn.BatchNormalization(512))
+--classifier:add(nn.BatchNormalization(512))
 classifier:add(nn.ReLU(true))
 classifier:add(nn.Dropout(0.5))
 classifier:add(nn.Linear(512,10))
