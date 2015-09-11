@@ -55,6 +55,7 @@ print('Will save at '..opt.save)
 paths.mkdir(opt.save)
 testLogger = optim.Logger(paths.concat(opt.save, 'test.log'))
 testLogger:setNames{'% mean class accuracy (train set)', '% mean class accuracy (test set)'}
+testLogger.showPlot = false
 
 parameters,gradParameters = model:getParameters()
 
