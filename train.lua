@@ -1,12 +1,129 @@
 require 'xlua'
 require 'optim'
+require 'cutorch'
 require 'cunn'
 dofile './provider.lua'
 local c = require 'trepl.colorize'
+require 'math'
+
+-- my opt library
+require 'sgdolsInit'
+require 'svd'
+
+
+-- luatrace
+--local luatrace = require('luatrace.profile')
+
+--luatrace.tron()
+
+torch.setdefaulttensortype('torch.CudaTensor')
+
+-- SGDOLS function
+function optim.sgdols(opfunc, x, state)
+   
+   -- (0) get/update state
+   local lr = 1.00
+   local gamma = 0.60
+   state.evalCounter = state.evalCounter or 0
+   local nevals = state.evalCounter
+   local p = state.numParameters
+   local P = state.P
+   local B = state.B
+   local G = state.G
+   local Gt = state.Gt
+   
+   -- (1) evaluate f(x) and df/dx
+   local fx,dfdx = opfunc(state.parametersSlow)
+   
+    -- start trace
+   --luatrace = require("luatrace")
+   --luatrace.tron()
+   
+   -- (2) update evaluation counter
+   state.evalCounter = state.evalCounter + 1
+   
+   -- (3) learning rate decay (annealing)
+   local clr = lr / ( (1.0 + nevals)^(gamma) )
+   
+   
+   -- (5) save old parameter
+   local xOne = torch.Tensor( p + 1 )
+   local y = torch.Tensor( p )
+   y = dfdx
+   xOne[{{1,p}}] = state.parametersSlow
+   xOne[ p + 1 ] = 1.0
+   
+   
+   -- (6) parameter update
+   if state.evalCounter > state.sgdSteps then
+      Gy = svdMatrix.mv(G, y)
+      Gty = svdMatrix.mv(Gt, y)
+      state.parametersSlow:add( -clr/2.0 , Gy )
+      state.parametersSlow:add( -clr/2.0 , Gty )
+   else
+      state.parametersSlow:add( -clr , y )
+   end
+     
+   x:mul( (sgdolsState.evalCounter -1)/sgdolsState.evalCounter )
+   x:add( sgdolsState.evalCounter , state.parametersSlow )
+   
+   -- (7) rank one update of matrices
+   uno = 1.0
+   local Px = torch.Tensor( p + 1 )
+   Px = svdMatrix.mv(P, xOne)
+   --[[
+   print( 'xOne norm : ', xOne:norm(2) )
+   print( 'y norm : ', y:norm(2) )
+   print( 'Px norm : ', Px:norm(2) )
+   print( 'state.parametersSlow norm : ', state.parametersSlow:norm(2) )
+   --]]
+   
+   
+   
+   b = uno + xOne:dot(Px)
+   alpha = uno/b
+   local u = torch.Tensor(p + 1)
+   u = Px:narrow(1, 1, p)
+   u:mul(alpha)
+   local v = torch.Tensor(p)
+   v = y:clone()
+   B:t()
+   local Btx = torch.Tensor( p )
+   Btx = svdMatrix.mv( B , xOne)
+   --print( 'Btx norm : ', Btx:norm(2) )
+   B:t()
+   
+   Btx:mul(-1.0)
+   v:add( Btx )
+   --print( 'xOne max: ', xOne[1])
+   --print( 'Btx max' , Btx[1])
+   state.B:addr( alpha , Px , v )
+   state.P:addr( -alpha ,Px , Px )
+   
+   local Gu = torch.Tensor( p )
+   Gu = svdMatrix.mv( G , u )
+   local Gv = torch.Tensor( p )
+   G:t()
+   Gv = svdMatrix.mv( G , v )
+   G:t()
+   b = uno + v:dot( Gu )
+   beta =  uno/b
+   
+   state.G:addr(-beta, Gu , Gv )
+   state.Gt:addr(-beta, Gv , Gu )
+   
+   -- stop trace
+   --luatrace.troff()
+   --os.exit()
+   
+   -- return x*, f(x) before optimization
+   return x,{fx}
+end
+
 
 opt = lapp[[
    -s,--save                  (default "logs")      subdirectory to save logs
-   -b,--batchSize             (default 128)          batch size
+   -b,--batchSize             (default 32)          batch size
    -r,--learningRate          (default 1)        learning rate
    --learningRateDecay        (default 1e-7)      learning rate decay
    --weightDecay              (default 0.0005)      weightDecay
@@ -15,6 +132,8 @@ opt = lapp[[
    --model                    (default vgg_bn_drop)     model name
    --max_epoch                (default 300)           maximum number of iterations
    --backend                  (default nn)            backend
+   --sgdSteps                 (default 200000)     SGD steps before SGDOLS
+   
 ]]
 
 print(opt)
@@ -30,7 +149,9 @@ do -- data augmentation module
   function BatchFlip:updateOutput(input)
     if self.train then
       local bs = input:size(1)
-      local flip_mask = torch.randperm(bs):le(bs/2)
+      local torchUtil = torch.FloatTensor()
+      --print(torchUtil)
+      local flip_mask = torchUtil:randperm(bs):le(bs/2)
       for i=1,input:size(1) do
         if flip_mask[i] == 1 then image.hflip(input[i], input[i]) end
       end
@@ -68,6 +189,8 @@ testLogger:setNames{'% mean class accuracy (train set)', '% mean class accuracy 
 testLogger.showPlot = false
 
 parameters,gradParameters = model:getParameters()
+print('parameters type : \n')
+print(type(parameters))
 
 
 print(c.blue'==>' ..' setting criterion')
@@ -84,6 +207,9 @@ optimState = {
 
 
 function train()
+  local nbPar = parameters:size(1)
+  print('<train> nb of parameters : \n')
+  print(nbPar)
   model:training()
   epoch = epoch or 1
 
@@ -93,7 +219,9 @@ function train()
   print(c.blue '==>'.." online epoch # " .. epoch .. ' [batchSize = ' .. opt.batchSize .. ']')
 
   local targets = torch.CudaTensor(opt.batchSize)
-  local indices = torch.randperm(provider.trainData.data:size(1)):long():split(opt.batchSize)
+  local torchUtil = torch.DoubleTensor()
+  print(torchUtil)
+  local indices = torchUtil:randperm(provider.trainData.data:size(1)):long():split(opt.batchSize)
   -- remove last element so that all the batches have equal size
   indices[#indices] = nil
 
@@ -117,7 +245,37 @@ function train()
 
       return f,gradParameters
     end
-    optim.sgd(feval, parameters, optimState)
+    
+    -- Perform SGDOLS step:
+    sgdolsState = sgdolsState or {
+      numParameters = nbPar,
+      learningRate = opt.learningRate,
+      rank = opt.rank,
+      momentum = opt.momentum,
+      sgdSteps = opt.sgdSteps,
+      learningRateDecay = 5e-7,
+      parametersMean = torch.Tensor(nbPar):zero(),
+      evalCounter = 0
+      }
+    --print('evalCounter : \n')
+    --print(sgdolsState.evalCounter)
+    if (sgdolsState.evalCounter > (sgdolsState.sgdSteps/opt.batchSize - 1)) then
+      --print('SGDOLS')
+      optim.sgdols(feval, parameters, sgdolsState)
+    else
+      --local neval = sgdolsState.evalCounter
+      --local frac = 1/(neval + 1)
+      --local parametersAdd = parameters
+      --local parametersMean = sgdolsState.parametersMean
+      --sgdolsState.parametersMean:add(-frac,parametersMean)
+      --sgdolsState.parametersMean:add(frac,parametersAdd)
+      --print('SGD')
+      optim.sgd(feval, parameters, sgdolsState)
+      if (sgdolsState.evalCounter > (sgdolsState.sgdSteps/opt.batchSize - 1) - 0.5 ) then
+        optim.sgdolsInit(feval, parameters , sgdolsState)
+      end
+    end
+    
   end
 
   confusion:updateValids()
@@ -195,5 +353,7 @@ for i=1,opt.max_epoch do
   train()
   test()
 end
+
+--luatrace.troff()
 
 
