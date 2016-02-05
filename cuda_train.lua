@@ -14,7 +14,8 @@
 
 require 'xlua'
 require 'optim'
-require 'nn'
+require 'cutorch'
+require 'cunn'
 dofile './provider.lua'
 local c = require 'trepl.colorize'
 require 'math'
@@ -35,6 +36,111 @@ require 'math'
 -- luatrace
 --local luatrace = require('luatrace.profile')
 --luatrace.tron()
+
+-- use CUDA
+torch.setdefaulttensortype('torch.CudaTensor')
+
+-- SGDOLS function
+--function optim.sgdols(opfunc, x, state)
+--   
+--   -- (0) get/update state
+--   local lr = 1.00
+--   local gamma = 0.60
+--   state.evalCounter = state.evalCounter or 0
+--   local nevals = state.evalCounter
+--   local p = state.numParameters
+--   local P = state.P
+--   local B = state.B
+--   local G = state.G
+--   local Gt = state.Gt
+--   
+--   -- (1) evaluate f(x) and df/dx
+--   local fx,dfdx = opfunc(state.parametersSlow)
+--   
+--    -- start trace
+--   --luatrace = require("luatrace")
+--   --luatrace.tron()
+--   
+--   -- (2) update evaluation counter
+--   state.evalCounter = state.evalCounter + 1
+--   
+--   -- (3) learning rate decay (annealing)
+--   local clr = lr / ( (1.0 + nevals)^(gamma) )
+--   
+--   
+--   -- (5) save old parameter
+--   local xOne = torch.Tensor( p + 1 )
+--   local y = torch.Tensor( p )
+--   y = dfdx
+--   xOne[{{1,p}}] = state.parametersSlow
+--   xOne[ p + 1 ] = 1.0
+--   
+--   
+--   -- (6) parameter update
+--   if state.evalCounter > state.sgdSteps then
+--      Gy = svdMatrix.mv(G, y)
+--      Gty = svdMatrix.mv(Gt, y)
+--      state.parametersSlow:add( -clr/2.0 , Gy )
+--      state.parametersSlow:add( -clr/2.0 , Gty )
+--   else
+--      state.parametersSlow:add( -clr , y )
+--   end
+--     
+--   x:mul( (sgdolsState.evalCounter -1)/sgdolsState.evalCounter )
+--   x:add( sgdolsState.evalCounter , state.parametersSlow )
+--   
+--   -- (7) rank one update of matrices
+--   uno = 1.0
+--   local Px = torch.Tensor( p + 1 )
+--   Px = svdMatrix.mv(P, xOne)
+--   --[[
+--   print( 'xOne norm : ', xOne:norm(2) )
+--   print( 'y norm : ', y:norm(2) )
+--   print( 'Px norm : ', Px:norm(2) )
+--   print( 'state.parametersSlow norm : ', state.parametersSlow:norm(2) )
+--   --]]
+--   
+--   
+--   
+--   b = uno + xOne:dot(Px)
+--   alpha = uno/b
+--   local u = torch.Tensor(p + 1)
+--   u = Px:narrow(1, 1, p)
+--   u:mul(alpha)
+--   local v = torch.Tensor(p)
+--   v = y:clone()
+--   B:t()
+--   local Btx = torch.Tensor( p )
+--   Btx = svdMatrix.mv( B , xOne)
+--   --print( 'Btx norm : ', Btx:norm(2) )
+--   B:t()
+--   
+--   Btx:mul(-1.0)
+--   v:add( Btx )
+--   --print( 'xOne max: ', xOne[1])
+--   --print( 'Btx max' , Btx[1])
+--   state.B:addr( alpha , Px , v )
+--   state.P:addr( -alpha ,Px , Px )
+--   
+--   local Gu = torch.Tensor( p )
+--   Gu = svdMatrix.mv( G , u )
+--   local Gv = torch.Tensor( p )
+--   G:t()
+--   Gv = svdMatrix.mv( G , v )
+--   G:t()
+--   b = uno + v:dot( Gu )
+--   beta =  uno/b
+--   
+--   state.G:addr(-beta, Gu , Gv )
+--   state.Gt:addr(-beta, Gv , Gu )
+--   
+--   -- stop trace
+--   --luatrace.troff()
+--   --os.exit()
+--   
+--   -- return x*, f(x) before optimization
+--   return x,{fx}
+--end
 
 opt = lapp[[
    -s,--save                  (default "logs")      subdirectory to save logs
@@ -121,6 +227,8 @@ print(model)
 
 print(c.blue '==>' ..' loading data')
 provider = torch.load 'provider.t7'
+provider.trainData.data = provider.trainData.data:cuda()
+provider.testData.data = provider.testData.data:cuda()
 
 confusion = optim.ConfusionMatrix(10)
 
@@ -136,7 +244,7 @@ print(type(parameters))
 
 
 print(c.blue'==>' ..' setting criterion')
-criterion = nn.CrossEntropyCriterion()
+criterion = nn.CrossEntropyCriterion():cuda()
 
 
 print(c.blue'==>' ..' configuring optimizer')
@@ -160,8 +268,8 @@ function train()
   
   print(c.blue '==>'.." online epoch # " .. epoch .. ' [batchSize = ' .. opt.batchSize .. ']')
 
-  local targets = torch.Tensor(opt.batchSize)
-  local torchUtil = torch.Tensor()
+  local targets = torch.CudaTensor(opt.batchSize)
+  local torchUtil = torch.DoubleTensor()
   print(torchUtil)
   local indices = torchUtil:randperm(provider.trainData.data:size(1)):long():split(opt.batchSize)
   -- remove last element so that all the batches have equal size
@@ -248,7 +356,9 @@ function test()
     paths.mkdir(opt.save)
     testLogger:add{train_acc, confusion.totalValid * 100}
     testLogger:style{'-','-'}
+    --torch.setdefaulttensortype('torch.FloatTensor')
     --testLogger:plot()
+    --torch.setdefaulttensortype('torch.CudaTensor')
 
     local base64im
     do

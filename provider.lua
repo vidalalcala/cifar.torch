@@ -5,8 +5,8 @@ require 'xlua'
 local Provider = torch.class 'Provider'
 
 function Provider:__init(full)
-  local trsize = 50000
-  local tesize = 10000
+  local trsize = 5000
+  local tesize = 1000
 
   -- download dataset
   if not paths.dirp('cifar-10-batches-t7') then
