@@ -1,128 +1,65 @@
-----------------------------------------------------------------------
--- This script shows how to train different models on the CIFAR10 
--- dataset, using SGD and SGDOLS
---
--- Jose V. Alcala-Burgos
--- vidal.alcala@gmail.com
-----------------------------------------------------------------------
---
-
---DEBUG LINE
---require('mobdebug').start()
---
-
-
 require 'xlua'
 require 'optim'
-require 'cutorch'
 require 'cunn'
 dofile './provider.lua'
 local c = require 'trepl.colorize'
-require 'math'
-
---Set parameters (used in DEBUG mode)
---myArg = {}
---myArg[0] = 'train.lua'
---myArg[1] = '-p'
---myArg[-2] = '-e'
---myArg[-1] = "require 'torch-env'"
---myArg[-3] = '/usr/local/bin/torch-qlua'
---_G["arg"] = myArg
-
--- luatrace
---local luatrace = require('luatrace.profile')
---luatrace.tron()
-
--- use CUDA
-torch.setdefaulttensortype('torch.CudaTensor')
 
 opt = lapp[[
    -s,--save                  (default "logs")      subdirectory to save logs
-   -b,--batchSize             (default 32)          batch size
+   -b,--batchSize             (default 128)          batch size
    -r,--learningRate          (default 1)        learning rate
    --learningRateDecay        (default 1e-7)      learning rate decay
    --weightDecay              (default 0.0005)      weightDecay
    -m,--momentum              (default 0.9)         momentum
    --epoch_step               (default 25)          epoch step
    --model                    (default vgg_bn_drop)     model name
-   --max_epoch                (default 6)           maximum number of iterations
+   --sgdSteps                 (default 200)         number of sgd steps before
+                                                      second order optimization
+   --max_epoch                (default 300)           maximum number of iterations
    --backend                  (default nn)            backend
-   --sgdSteps                 (default 4500)     SGD steps before fast sgdsvd
-   
 ]]
 
 print(opt)
 
---do -- data augmentation module
---  local BatchFlip,parent = torch.class('nn.BatchFlip', 'nn.Module')
---
---  function BatchFlip:__init()
---    parent.__init(self)
---    self.train = true
---  end
---
---  function BatchFlip:updateOutput(input)
---    if self.train then
---      local bs = input:size(1)
---      local torchUtil = torch.FloatTensor()
---      --print(torchUtil)
---      local flip_mask = torchUtil:randperm(bs):le(bs/2)
---      for i=1,input:size(1) do
---        --print('image : ')
---        --print(input[i])
---        --if flip_mask[i] == 1 then image.hflip(input[i], input[i]) end
---      end
---    end
---    self.output = input
---    return self.output
---  end
---end
+do -- data augmentation module
+  local BatchFlip,parent = torch.class('nn.BatchFlip', 'nn.Module')
+
+  function BatchFlip:__init()
+    parent.__init(self)
+    self.train = true
+  end
+
+  function BatchFlip:updateOutput(input)
+    if self.train then
+      local bs = input:size(1)
+      local flip_mask = torch.randperm(bs):le(bs/2)
+      for i=1,input:size(1) do
+        if flip_mask[i] == 1 then image.hflip(input[i], input[i]) end
+      end
+    end
+    self.output = input
+    return self.output
+  end
+end
 
 print(c.blue '==>' ..' configuring model')
 local model = nn.Sequential()
-model:add(nn.SpatialConvolution(3, 64, 3, 3, 1, 1, 1, 1))
-model:add(nn.RReLU())
-model:add(nn.SpatialConvolution(64, 64, 3, 3, 1, 1, 1, 1))
-model:add(nn.RReLU())
-model:add(nn.SpatialMaxPooling(2, 2))
-model:add(nn.Dropout(0.25))
-      
-model:add(nn.SpatialConvolution(64, 128, 3, 3, 1, 1, 1, 1))
-model:add(nn.RReLU())
-model:add(nn.SpatialConvolution(128, 128, 3, 3, 1, 1, 1, 1))
-model:add(nn.RReLU())
-model:add(nn.SpatialMaxPooling(2, 2))
-model:add(nn.Dropout(0.25))
-   
-model:add(nn.SpatialConvolution(128, 256, 3, 3, 1, 1, 1, 1))
-model:add(nn.RReLU())
-model:add(nn.SpatialConvolution(256, 256, 3, 3, 1, 1, 1, 1))
-model:add(nn.RReLU())
-model:add(nn.SpatialConvolution(256, 256, 3, 3, 1, 1, 1, 1))
-model:add(nn.RReLU())
-model:add(nn.SpatialConvolution(256, 256, 3, 3, 1, 1, 1, 1))
-model:add(nn.RReLU())
-model:add(nn.SpatialMaxPooling(2, 2))
-model:add(nn.Dropout(0.25))
-   
--- Fully Connected Layers   
-model:add(nn.SpatialConvolution(256, 1024, 3, 3, 1, 1, 0, 0))
-model:add(nn.RReLU())
-model:add(nn.Dropout(0.5))
-model:add(nn.SpatialConvolution(1024, 1024, 2, 2, 1, 1, 0, 0))
-model:add(nn.RReLU())
-model:add(nn.Dropout(0.5))
-   
-model:add(nn.SpatialConvolutionMM(1024, 10, 1, 1))
-model:add(nn.Reshape(10))
-model:add(nn.SoftMax())
+model:add(nn.BatchFlip():float())
+model:add(nn.Copy('torch.FloatTensor','torch.CudaTensor'):cuda())
+model:add(dofile('models/'..opt.model..'.lua'):cuda())
+model:get(2).updateGradInput = function(input) return end
+
+if opt.backend == 'cudnn' then
+   require 'cudnn'
+   cudnn.convert(model:get(3), cudnn)
+end
 
 print(model)
 
 print(c.blue '==>' ..' loading data')
 provider = torch.load 'provider.t7'
-provider.trainData.data = provider.trainData.data:cuda()
-provider.testData.data = provider.testData.data:cuda()
+provider.trainData.data = provider.trainData.data:float()
+provider.testData.data = provider.testData.data:float()
 
 confusion = optim.ConfusionMatrix(10)
 
@@ -133,12 +70,11 @@ testLogger:setNames{'% mean class accuracy (train set)', '% mean class accuracy 
 testLogger.showPlot = false
 
 parameters,gradParameters = model:getParameters()
-print('parameters type : \n')
-print(type(parameters))
 
 
 print(c.blue'==>' ..' setting criterion')
-criterion = nn.CrossEntropyCriterion()
+criterion = nn.CrossEntropyCriterion():cuda()
+
 
 print(c.blue'==>' ..' configuring optimizer')
 optimState = {
@@ -146,14 +82,11 @@ optimState = {
   weightDecay = opt.weightDecay,
   momentum = opt.momentum,
   learningRateDecay = opt.learningRateDecay,
-  rank = opt.rank,
   sgdSteps = opt.sgdSteps,
-  evalCounter = 0
 }
 
-function train() 
-  print('<train> nb of parameters : \n')
-  print(parameters:size(1))
+
+function train()
   model:training()
   epoch = epoch or 1
 
@@ -163,9 +96,7 @@ function train()
   print(c.blue '==>'.." online epoch # " .. epoch .. ' [batchSize = ' .. opt.batchSize .. ']')
 
   local targets = torch.CudaTensor(opt.batchSize)
-  local torchUtil = torch.DoubleTensor()
-  print(torchUtil)
-  local indices = torchUtil:randperm(provider.trainData.data:size(1)):long():split(opt.batchSize)
+  local indices = torch.randperm(provider.trainData.data:size(1)):long():split(opt.batchSize)
   -- remove last element so that all the batches have equal size
   indices[#indices] = nil
 
@@ -173,8 +104,8 @@ function train()
   for t,v in ipairs(indices) do
     xlua.progress(t, #indices)
 
-    local inputs = provider.trainData.data:index(1, v)
-    targets:copy(provider.trainData.labels:index(1, v))
+    local inputs = provider.trainData.data:index(1,v)
+    targets:copy(provider.trainData.labels:index(1,v))
 
     local feval = function(x)
       if x ~= parameters then parameters:copy(x) end
@@ -184,11 +115,11 @@ function train()
       local f = criterion:forward(outputs, targets)
       local df_do = criterion:backward(outputs, targets)
       model:backward(inputs, df_do)
+
       confusion:batchAdd(outputs, targets)
 
-      return f, gradParameters
+      return f,gradParameters
     end
-    
     optim.sgdsvd(feval, parameters, optimState)
   end
 
@@ -207,8 +138,8 @@ function test()
   -- disable flips, dropouts and batch normalization
   model:evaluate()
   print(c.blue '==>'.." testing")
-  local bs = 32
-  for i=1,provider.testData.data:size(1) - bs,bs do
+  local bs = 125
+  for i=1,provider.testData.data:size(1),bs do
     local outputs = model:forward(provider.testData.data:narrow(1,i,bs))
     confusion:batchAdd(outputs, provider.testData.labels:narrow(1,i,bs))
   end
@@ -220,9 +151,7 @@ function test()
     paths.mkdir(opt.save)
     testLogger:add{train_acc, confusion.totalValid * 100}
     testLogger:style{'-','-'}
-    --torch.setdefaulttensortype('torch.FloatTensor')
-    --testLogger:plot()
-    --torch.setdefaulttensortype('torch.CudaTensor')
+    testLogger:plot()
 
     local base64im
     do
@@ -269,7 +198,5 @@ for i=1,opt.max_epoch do
   train()
   test()
 end
-
---luatrace.troff()
 
 
