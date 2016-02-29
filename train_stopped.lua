@@ -1,21 +1,26 @@
+require 'torch'
 require 'xlua'
 require 'optim'
 require 'cunn'
 dofile './provider.lua'
 local c = require 'trepl.colorize'
+require 'math'
+require 'pl'
 
 opt = lapp[[
    -s,--save                  (default "logs")      subdirectory to save logs
-   -b,--batchSize             (default 128)          batch size
-   -r,--learningRate          (default 1)        learning rate
-   --learningRateDecay        (default 1e-7)      learning rate decay
+   -b,--batchSize             (default 32)         batch size
+   -r,--learningRate          (default 10)           learning rate
+   --learningRateDecay        (default 1e-7)        learning rate decay
    --weightDecay              (default 0.0005)      weightDecay
    -m,--momentum              (default 0.9)         momentum
-   --epoch_step               (default 25)          epoch step
-   --model                    (default vgg_bn_drop)     model name
-   --max_epoch                (default 4000)           maximum number of iterations
-   --backend                  (default nn)            backend
-   --sgdSteps                 (default 1169000)         sgd steps before second order optimization
+   --observation_step         (default 25)          observation step
+   --model                    (default vgg_bn_drop) model name
+   --max_observations         (default 100000)      maximum number of observations
+   --sgdSteps                 (default 300)          sgd steps before sgdsvd
+   --observerSteps            (default 40)          steps between test observations
+   --backend                  (default nn)          backend
+   --visualize                (default true)        visualize weigths
 ]]
 
 print(opt)
@@ -66,7 +71,7 @@ print('Will save at '..opt.save)
 paths.mkdir(opt.save)
 testLogger = optim.Logger(paths.concat(opt.save, 'test.log'))
 testLogger:setNames{'% mean class accuracy (train set)', '% mean class accuracy (test set)'}
-testLogger.showPlot = false
+testLogger.showPlot = true
 
 parameters,gradParameters = model:getParameters()
 
@@ -77,34 +82,46 @@ criterion = nn.CrossEntropyCriterion():cuda()
 
 print(c.blue'==>' ..' configuring optimizer')
 optimState = {
-  learningRate = opt.learningRate,
-  weightDecay = opt.weightDecay,
-  momentum = opt.momentum,
-  learningRateDecay = opt.learningRateDecay,
-  sgdSteps = opt.sgdSteps
+  sgdSteps = opt.sgdSteps,
+  learningRate = opt.learningRate
 }
 
+function display(input)
+  iter = iter or 0
+  require 'image'
+  win_input = image.display{image=input, win=win_input, zoom=2, legend='input'}
+  if iter % 10 == 0 then
+    win_w1 = image.display{
+      image=model:get(3):get(1).weight, zoom=4, nrow=10,
+      min=-1, max=1,
+      win=win_w1, legend='stage 1: weights', padding=1
+      }
+    win_w2 = image.display{
+      image=model:get(3):get(54):get(6).weight, zoom=4, nrow=10,
+      min=-1, max=1,
+      win=win_w2, legend='stage 2: weights', padding=1
+      }
+   end
+   iter = iter + 1
+end
 
-function train()
+function train(trainData)
   model:training()
-  epoch = epoch or 1
-
-  -- drop learning rate every "epoch_step" epochs
-  if epoch % opt.epoch_step == 0 then optimState.learningRate = optimState.learningRate/2 end
+  observation = observation or 1
   
-  print(c.blue '==>'.." online epoch # " .. epoch .. ' [batchSize = ' .. opt.batchSize .. ']')
+  print(c.blue '==>'.." online observation # " .. observation .. ' [batchSize = ' .. opt.batchSize .. ']')
 
   local targets = torch.CudaTensor(opt.batchSize)
-  local indices = torch.randperm(provider.trainData.data:size(1)):long():split(opt.batchSize)
+  local indices = torch.randperm(opt.observerSteps * opt.batchSize):long():split(opt.batchSize)
   -- remove last element so that all the batches have equal size
   indices[#indices] = nil
 
   local tic = torch.tic()
   for t,v in ipairs(indices) do
-    xlua.progress(t, #indices)
+    --xlua.progress(t, #indices)
 
-    local inputs = provider.trainData.data:index(1,v)
-    targets:copy(provider.trainData.labels:index(1,v))
+    local inputs = trainData.data:index(1,v)
+    targets:copy(trainData.labels:index(1,v))
 
     local feval = function(x)
       if x ~= parameters then parameters:copy(x) end
@@ -116,6 +133,11 @@ function train()
       model:backward(inputs, df_do)
 
       confusion:batchAdd(outputs, targets)
+      
+      -- visualize?
+            if opt.visualize then
+               display(inputs[1])
+            end
 
       return f,gradParameters
     end
@@ -129,18 +151,18 @@ function train()
   train_acc = confusion.totalValid * 100
 
   confusion:zero()
-  epoch = epoch + 1
+  observation = observation + 1
 end
 
 
-function test()
+function test(testData)
   -- disable flips, dropouts and batch normalization
   model:evaluate()
   print(c.blue '==>'.." testing")
-  local bs = 125
-  for i=1,provider.testData.data:size(1),bs do
-    local outputs = model:forward(provider.testData.data:narrow(1,i,bs))
-    confusion:batchAdd(outputs, provider.testData.labels:narrow(1,i,bs))
+  local bs = 32
+  for i = 1, testData.data:size(1), bs do
+    local outputs = model:forward(testData.data:narrow(1, i, bs))
+    confusion:batchAdd(outputs, testData.labels:narrow(1, i, bs))
   end
 
   confusion:updateValids()
@@ -150,7 +172,10 @@ function test()
     paths.mkdir(opt.save)
     testLogger:add{train_acc, confusion.totalValid * 100}
     testLogger:style{'-','-'}
+    currentTensorType = torch.Tensor():type()
+    torch.setdefaulttensortype('torch.FloatTensor')
     testLogger:plot()
+    torch.setdefaulttensortype(currentTensorType)
 
     local base64im
     do
@@ -182,8 +207,8 @@ function test()
     file:close()
   end
 
-  -- save model every 50 epochs
-  if epoch % 50 == 0 then
+  -- save model
+  if observation % 30 == 0 then
     local filename = paths.concat(opt.save, 'model.net')
     print('==> saving model to '..filename)
     torch.save(filename, model:get(3):clearState())
@@ -193,8 +218,25 @@ function test()
 end
 
 
-for i=1,opt.max_epoch do
-  train()
-  test()
+for i = 1, opt.max_observations do
+  local trainIndices = torch.randperm(provider.trainData.data:size(1)):narrow(1, 1, opt.batchSize * opt.observerSteps)
+  local trainData = {
+     data = torch.Tensor(provider.trainData.data:size(1), 3072),
+     labels = torch.Tensor(provider.trainData.data:size(1)),
+     size = function() return trsize end
+  }
+  trainData.data = provider.trainData.data:index(1, trainIndices:long())
+  trainData.labels = provider.trainData.labels:index(1, trainIndices:long())
+  
+  local testIndices = torch.randperm(provider.testData.data:size(1)):narrow(1, 1, opt.batchSize * opt.observerSteps)
+  local testData = {
+     data = torch.Tensor(provider.testData.data:size(1), 3072),
+     labels = torch.Tensor(provider.testData.data:size(1)),
+     size = function() return trsize end
+  }
+  testData.data = provider.testData.data:index(1, testIndices:long())
+  testData.labels = provider.testData.labels:index(1, testIndices:long())
+  
+  train(trainData)
+  test(testData)
 end
-

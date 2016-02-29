@@ -13,9 +13,9 @@ opt = lapp[[
    -m,--momentum              (default 0.9)         momentum
    --epoch_step               (default 25)          epoch step
    --model                    (default vgg_bn_drop)     model name
-   --max_epoch                (default 4000)           maximum number of iterations
+   --max_epoch                (default 400)           maximum number of iterations
+   --sgdSteps                 (default 116900)        sgd steps before sgdsvd
    --backend                  (default nn)            backend
-   --sgdSteps                 (default 1169000)         sgd steps before second order optimization
 ]]
 
 print(opt)
@@ -150,7 +150,7 @@ function test()
     paths.mkdir(opt.save)
     testLogger:add{train_acc, confusion.totalValid * 100}
     testLogger:style{'-','-'}
-    testLogger:plot()
+    --testLogger:plot()
 
     local base64im
     do
